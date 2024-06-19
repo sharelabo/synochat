@@ -1,0 +1,7 @@
+myenv/
+__pychache__/
+*.pyc
+*.pyo
+.DS_Store
+*.xlsx
+.env
