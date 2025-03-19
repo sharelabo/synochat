@@ -1,0 +1,14 @@
+version: '3'
+
+services:
+  synology-chat-webhook:
+    build: .
+    container_name: synology-chat-webhook
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - MESSAGES_FILE=/app/data/received_messages.json
+      - PORT=5001
+    restart: always

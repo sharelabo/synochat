@@ -1,93 +1,108 @@
-from flask import Flask, request
-from synochat.webhooks import OutgoingWebhook
-import pandas as pd
-from datetime import datetime
+# Synology ChatからのWebhookを受信し、メッセージをJSONファイルに保存するアプリケーション
+# Dockerコンテナとして実行することを前提とした設計
+
 import logging
 import os
+import json
+from datetime import datetime
 from dotenv import load_dotenv
-
-app = Flask(__name__)
+from flask import Flask, request, jsonify
 
 # ログ設定
-logging.basicConfig(level=logging.DEBUG)
+fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+logging.basicConfig(level=logging.DEBUG, format=fmt)
+logger = logging.getLogger(__name__)
 
 # 環境変数を読み込む
 load_dotenv()
 token = os.getenv("SYNOLOGY_CHAT_TOKEN")
-tag_to_excel = {
-    os.getenv("TAG_1"): os.getenv("EXCEL_1"),
-    os.getenv("TAG_2"): os.getenv("EXCEL_2"),
-    os.getenv("TAG_3"): os.getenv("EXCEL_3"),
-    os.getenv("TAG_4"): os.getenv("EXCEL_4"),
-    os.getenv("TAG_5"): os.getenv("EXCEL_5"),
-    os.getenv("TAG_6"): os.getenv("EXCEL_6"),
-    os.getenv("TAG_7"): os.getenv("EXCEL_7"),
-}
+
+# Flaskアプリケーションの初期化
+app = Flask(__name__)
+
+# JSONメッセージを保存するファイル
+MESSAGES_FILE = os.getenv("MESSAGES_FILE", "received_messages.json")
 
 
-@app.route("/echo", methods=["POST"])
-def echo():
-    logging.debug("Received a POST request")
+def verify_token(received_token):
+    """トークンを検証する関数"""
+    return token == received_token
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook_receiver():
+    """Webhookを受信し、JSONファイルに保存する"""
+    logger.info(f"Webhookリクエストを受信しました: {request.method}")
+    logger.info(f"リクエストヘッダー: {dict(request.headers)}")
 
     try:
-        webhook = OutgoingWebhook(request.form, token, verbose=True)
-    except Exception as e:
-        logging.error(f"Failed to create OutgoingWebhook: {e}")
-        return "Failed to create OutgoingWebhook", 500
-
-    if not webhook.authenticate(token):
-        logging.error("Token mismatch")
-        return "Outgoing Webhook authentication failed: Token mismatch.", 403
-
-    logging.debug(f"Webhook data: {webhook}")
-
-    # タイムスタンプ、投稿者名、投稿内容を取得してエクセルに記録
-    try:
-        timestamp = int(webhook.timestamp) / 1000  # ミリ秒から秒に変換
-        dt = datetime.fromtimestamp(timestamp)
-        username = webhook.username
-        text = webhook.text
-
-        # タグに基づいてエクセルファイルを選択
-        excel_file_path = next(
-            (excel_file for tag, excel_file in tag_to_excel.items() if tag in text),
-            None,
-        )
-
-        if not excel_file_path:
-            return "No matching tag found.", 200
-
-        # 新規データをDataFrameにまとめる
-        new_data = pd.DataFrame(
-            {
-                "Date": [dt],
-                "Username": [username],
-                "Text": [text],
-            }
-        )
-
-        # エクセルファイルに追記または新規作成
-        if not os.path.exists(excel_file_path):
-            new_data.to_excel(excel_file_path, index=False)
-            logging.debug("Excel file created and data recorded")
+        # リクエストデータの処理
+        if request.is_json:
+            data = request.get_json()
+            logger.info("JSONデータを受信しました")
         else:
-            # 既存のデータを読み込む
-            with pd.ExcelWriter(
-                excel_file_path, engine="openpyxl", mode="a", if_sheet_exists="overlay"
-            ) as writer:
-                new_data.to_excel(
-                    writer,
-                    index=False,
-                    header=False,
-                    startrow=writer.sheets["Sheet1"].max_row,
-                )
-            logging.debug("Data appended to existing Excel file")
+            data = request.form.to_dict()
+            logger.info(f"フォームデータを受信しました: {data}")
+            # リクエストボディも表示
+            try:
+                raw_data = request.get_data().decode("utf-8")
+                logger.info(f"リクエストボディ(生): {raw_data}")
+            except Exception:
+                logger.info("リクエストボディのデコードに失敗しました")
 
-        return "Timestamp, username, and text recorded.", 200
+        logger.debug(f"受信データ: {data}")
+
+        # トークンの検証
+        received_token = data.get("token")
+        logger.info(f"受信したトークン: {received_token}")
+        logger.info(f"期待するトークン: {token}")
+
+        if not verify_token(received_token):
+            logger.warning("トークンが一致しません")
+            error_resp = {"status": "error", "message": "Invalid token"}
+            return jsonify(error_resp), 403
+
+        # 現在時刻を追加
+        data["received_at"] = datetime.now().isoformat()
+
+        # メッセージファイルのディレクトリを確認
+        messages_dir = os.path.dirname(MESSAGES_FILE)
+        if messages_dir and not os.path.exists(messages_dir):
+            os.makedirs(messages_dir, exist_ok=True)
+            logger.info(f"ディレクトリを作成しました: {messages_dir}")
+
+        # 既存のメッセージを読み込む
+        messages = []
+        if os.path.exists(MESSAGES_FILE):
+            try:
+                with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
+                    messages = json.load(f)
+            except Exception as e:
+                logger.error(f"メッセージファイルの読み込みに失敗しました: {e}")
+
+        # 新しいメッセージを追加
+        messages.append(data)
+
+        # メッセージを保存
+        with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
+            json.dump(messages, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"メッセージをファイルに保存しました: {MESSAGES_FILE}")
+        return jsonify({"status": "ok", "message": "Message received"}), 200
+
     except Exception as e:
-        logging.error(f"Failed to record data: {e}")
-        return "Failed to record data", 500
+        logger.error(f"Webhookの処理中にエラーが発生しました: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def run_server(host="0.0.0.0", port=5001):
+    """Webhookサーバーを実行する関数"""
+    logger.info(f"Webhookサーバーを起動します: http://{host}:{port}/webhook")
+    logger.info(f"メッセージの保存先: {MESSAGES_FILE}")
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":
-    app.run("0.0.0.0", port=5001, debug=True)
+    # サーバーモード
+    port = int(os.getenv("PORT", 5001))
+    run_server(port=port)

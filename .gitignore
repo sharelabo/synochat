@@ -1,7 +1,14 @@
-myenv/
+venv/
 __pychache__/
 *.pyc
 *.pyo
 .DS_Store
 *.xlsx
 .env
+
+# Docker関連
+data/
+received_messages.json
+received_messages.json.bak
+*.log
+server_log.txt
