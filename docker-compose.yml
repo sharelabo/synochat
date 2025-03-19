@@ -5,10 +5,21 @@ services:
     build: .
     container_name: synology-chat-webhook
     ports:
-      - "5001:5001"
+      - "5002:5001"
     volumes:
       - ./data:/app/data
     environment:
-      - MESSAGES_FILE=/app/data/received_messages.json
+      - DATA_DIR=/app/data
       - PORT=5001
+      - SYNOLOGY_CHAT_TOKEN=${SYNOLOGY_CHAT_TOKEN}
     restart: always
+
+  excel-generator:
+    build: .
+    container_name: excel-generator
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+    command: python create_excel.py
+    restart: "no"  # 一度だけ実行して終了
