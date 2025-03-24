@@ -19,6 +19,10 @@ WEBDAV_USERNAME = os.getenv("WEBDAV_USERNAME")
 WEBDAV_PASSWORD = os.getenv("WEBDAV_PASSWORD")
 WEBDAV_FOLDER = os.getenv("WEBDAV_FOLDER", "/ExcelReports")  # WebDAV上の保存先フォルダ
 
+# OpenAI API設定
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = "https://api.openai.com/v1"
+
 # スクリプトのディレクトリを取得
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -77,14 +81,132 @@ def extract_tags(text):
     return tags, clean_text
 
 
+def analyze_message_intent(message: str) -> str:
+    """GPT-4o-mini-2024-07-18を使用してメッセージの意図を分析"""
+    if not OPENAI_API_KEY:
+        print("OPENAI_API_KEYが設定されていません")
+        return "unknown"
+
+    # 空のメッセージをチェック
+    if not message or message.isspace():
+        print("メッセージが空です")
+        return "unknown"
+
+    # #社長予定タグがある場合は出勤として判定
+    if "#社長予定" in message:
+        print("社長予定タグを検出: startとして判定")
+        return "start"
+
+    try:
+        print(f"メッセージを分析中: {message}")
+
+        # APIリクエストの設定
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        }
+
+        # プロンプトの設定
+        prompt = f"""
+以下のメッセージから、業務の開始・終了の意図を判定してください。
+単純なキーワードマッチではなく、文脈や表現全体から判断してください。
+
+判定は以下のいずれかの文字列で返してください：
+- start: 業務開始のメッセージ（例：「業務開始します」「在宅勤務を開始します」）
+- end: 業務終了のメッセージ（例：「業務終了します」「本日の業務を終えます」）
+- other: それ以外のメッセージ
+
+メッセージ: {message}
+
+判定の際は以下の点を考慮してください：
+1. 明示的な業務開始/終了の表現
+   - 業務開始：「業務開始」「始業」「出勤」など、明確に業務の開始を宣言する表現
+   - 業務終了：「業務終了」「退勤」「帰宅」など、明確に業務の終了を宣言する表現
+
+2. 暗示的な業務開始/終了の表現
+   - 業務開始：「おはようございます」＋その日の業務予定の列挙
+   - 業務終了：「お疲れ様です」＋業務の完了報告
+
+3. 文脈による判断
+   - 業務開始：一日の業務予定を箇条書きで列挙している
+   - 業務終了：一日の業務報告や総括をしている
+
+4. 以下は業務開始/終了とみなさない
+   - 単なる外出や戻り時間の報告
+   - 書類や作業の依頼
+   - 通常の業務連絡
+   - 移動の報告
+   - 作業状況の中間報告
+
+回答は start, end, other のいずれかのみを返してください。
+"""
+
+        # APIリクエストを送信
+        request_data = {
+            "model": "gpt-4o-mini-2024-07-18",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "あなたはメッセージの意図を判定するアシスタントです。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 50,  # トークン数を増やす
+        }
+        print("APIリクエストを送信中...")
+        print(f"リクエストURL: {OPENAI_API_BASE}/chat/completions")
+        print(
+            f"リクエストデータ: {json.dumps(request_data, ensure_ascii=False, indent=2)}"
+        )
+
+        response = requests.post(
+            f"{OPENAI_API_BASE}/chat/completions",
+            headers=headers,
+            json=request_data,
+        )
+
+        # レスポンスのステータスコードを確認
+        print(f"APIレスポンスステータス: {response.status_code}")
+        if response.status_code != 200:
+            print(f"APIエラーレスポンス: {response.text}")
+            return "unknown"
+
+        result = response.json()
+        print(f"APIレスポンス: {json.dumps(result, ensure_ascii=False, indent=2)}")
+
+        intent = result["choices"][0]["message"]["content"].strip().lower()
+        print(f"判定結果: {intent}")
+
+        # 有効な判定結果かチェック
+        if intent not in ["start", "end", "other"]:
+            print(f"不正な判定結果: {intent}")
+            return "unknown"
+
+        return intent
+
+    except requests.exceptions.RequestException as e:
+        print(f"APIリクエスト中にエラーが発生: {str(e)}")
+        return "unknown"
+    except json.JSONDecodeError as e:
+        print(f"JSONデコードエラー: {str(e)}")
+        print(f"レスポンス内容: {response.text}")
+        return "unknown"
+    except Exception as e:
+        print(f"予期せぬエラーが発生: {str(e)}")
+        import traceback
+
+        print(f"詳細なエラー情報: {traceback.format_exc()}")
+        return "unknown"
+
+
 def classify_time(text, time_str):
     """メッセージの内容に基づいて時刻を分類"""
-    has_start = "開始" in text
-    has_end = "終了" in text
+    intent = analyze_message_intent(text)
 
-    if has_start and not has_end:
+    if intent == "start":
         return time_str, "", ""
-    elif not has_start and has_end:
+    elif intent == "end":
         return "", time_str, ""
     else:
         return "", "", time_str
@@ -120,13 +242,15 @@ def process_messages():
         try:
             # JSONファイルを読み込む
             with open(json_path, "r", encoding="utf-8") as f:
-                messages = json.load(f)  # 直接メッセージの配列を読み込む
+                messages = json.load(f)
 
             # メッセージを処理
             processed_messages = {}
             for msg in messages:
                 # タグと本文を分離
-                text = msg.get("text", "")
+                text = msg.get(
+                    "text", msg.get("message", "")
+                )  # textフィールドがない場合はmessageフィールドを使用
                 tags, clean_text = extract_tags(text)
                 tags_str = (
                     ", ".join(tags) if tags else ""
@@ -324,7 +448,9 @@ def main():
         processed_messages = {}
         for msg in messages:
             # タグと本文を分離
-            text = msg.get("text", "")
+            text = msg.get(
+                "text", msg.get("message", "")
+            )  # textフィールドがない場合はmessageフィールドを使用
             tags, clean_text = extract_tags(text)
             tags_str = ", ".join(tags) if tags else ""  # '#'を含めたタグをそのまま使用
 
